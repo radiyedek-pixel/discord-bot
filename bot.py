@@ -677,10 +677,10 @@ class RemoveMemberModal(discord.ui.Modal, title="Remove Member from Ticket"):
         channel_name = f"ticket-{ticket_number}"
         
         try:
-            # Get admin role for permissions
+            # Get admin role for permissions (fallback to first role with manage_messages)
             admin_role = None
             for role in guild.roles:
-                if role.permissions.administrator:
+                if role.permissions.administrator or role.permissions.manage_messages:
                     admin_role = role
                     break
             
@@ -690,7 +690,7 @@ class RemoveMemberModal(discord.ui.Modal, title="Remove Member from Ticket"):
                 user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
             }
             
-            # Add admin role permissions
+            # Add admin/mod role permissions if found
             if admin_role:
                 overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
             
