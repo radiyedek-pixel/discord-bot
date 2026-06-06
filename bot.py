@@ -505,8 +505,11 @@ TICKET_CATEGORY_SETUP = {}
 # Ticket Log Channel Storage (guild_id: channel_id)
 TICKET_LOG_CHANNEL = {}
 
-# Ticket Info Storage (channel_id: {user_id, ticket_number, category})
+# Ticket Info Storage (channel_id: {user_id, ticket_number, category, members})
 TICKET_INFO = {}
+
+# Ticket Claimed By (channel_id: moderator_id)
+TICKET_CLAIMED_BY = {}
 
 # Audit Log Channel Storage (guild_id: channel_id)
 AUDIT_LOG_CHANNEL = {}
@@ -557,6 +560,96 @@ class TicketReasonModal(discord.ui.Modal, title="Ticket Reason"):
         super().__init__()
         self.category = category
         self.user_interaction = user_interaction
+
+# Add Member Modal
+class AddMemberModal(discord.ui.Modal, title="Add Member to Ticket"):
+    member = discord.ui.TextInput(label="Member ID or mention", style=discord.TextStyle.short, placeholder="@user or user ID")
+    reason = discord.ui.TextInput(label="Reason for adding", style=discord.TextStyle.short, placeholder="Why are they added?", required=False)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        channel = interaction.channel
+        if channel.id not in TICKET_INFO:
+            await interaction.followup.send("❌ This is not a ticket channel!", ephemeral=True)
+            return
+        
+        try:
+            # Parse member
+            member_str = self.member.value.strip()
+            if member_str.startswith('<@'):
+                member_id = int(member_str.replace('<@', '').replace('>', '').replace('!', ''))
+            else:
+                member_id = int(member_str)
+            
+            member = await interaction.guild.fetch_member(member_id)
+            
+            # Add member to ticket
+            if member.id not in TICKET_INFO[channel.id].get('members', []):
+                if 'members' not in TICKET_INFO[channel.id]:
+                    TICKET_INFO[channel.id]['members'] = []
+                TICKET_INFO[channel.id]['members'].append(member.id)
+            
+            # Give permissions
+            await channel.set_permissions(member, read_messages=True, send_messages=True)
+            
+            embed = discord.Embed(
+                title=f"{EMOJI_PLUS} Member Added",
+                description=f"{member.mention} has been added to the ticket",
+                color=discord.Color(0x2ecc71)
+            )
+            if self.reason.value:
+                embed.add_field(name="Reason", value=self.reason.value, inline=False)
+            embed.set_image(url=LOGO_URL)
+            
+            await channel.send(embed=embed)
+            await interaction.followup.send("✅ Member added!", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+# Remove Member Modal
+class RemoveMemberModal(discord.ui.Modal, title="Remove Member from Ticket"):
+    member = discord.ui.TextInput(label="Member ID or mention", style=discord.TextStyle.short, placeholder="@user or user ID")
+    reason = discord.ui.TextInput(label="Reason for removal", style=discord.TextStyle.short, placeholder="Why are they removed?", required=False)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        channel = interaction.channel
+        if channel.id not in TICKET_INFO:
+            await interaction.followup.send("❌ This is not a ticket channel!", ephemeral=True)
+            return
+        
+        try:
+            # Parse member
+            member_str = self.member.value.strip()
+            if member_str.startswith('<@'):
+                member_id = int(member_str.replace('<@', '').replace('>', '').replace('!', ''))
+            else:
+                member_id = int(member_str)
+            
+            member = await interaction.guild.fetch_member(member_id)
+            
+            # Remove member from ticket
+            if 'members' in TICKET_INFO[channel.id] and member.id in TICKET_INFO[channel.id]['members']:
+                TICKET_INFO[channel.id]['members'].remove(member.id)
+            
+            # Remove permissions
+            await channel.set_permissions(member, read_messages=False, send_messages=False)
+            
+            embed = discord.Embed(
+                title=f"{EMOJI_USER_MINUS} Member Removed",
+                description=f"{member.mention} has been removed from the ticket",
+                color=discord.Color(0xe74c3c)
+            )
+            if self.reason.value:
+                embed.add_field(name="Reason", value=self.reason.value, inline=False)
+            embed.set_image(url=LOGO_URL)
+            
+            await channel.send(embed=embed)
+            await interaction.followup.send("✅ Member removed!", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -584,11 +677,29 @@ class TicketReasonModal(discord.ui.Modal, title="Ticket Reason"):
         channel_name = f"ticket-{ticket_number}"
         
         try:
+            # Get admin role for permissions
+            admin_role = None
+            for role in guild.roles:
+                if role.permissions.administrator:
+                    admin_role = role
+                    break
+            
+            # Create channel with private permissions
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            }
+            
+            # Add admin role permissions
+            if admin_role:
+                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            
             # Create channel in the selected category
             ticket_channel = await guild.create_text_channel(
                 name=channel_name,
                 topic=f"Ticket #{ticket_number} - {TICKET_CATEGORIES[category]['name']} - {user.name}",
-                category=parent_category
+                category=parent_category,
+                overwrites=overwrites
             )
             
             # Send welcome embed
@@ -619,12 +730,17 @@ class TicketReasonModal(discord.ui.Modal, title="Ticket Reason"):
             
             await ticket_channel.send(embed=reason_embed)
             
+            # Send action buttons
+            view = TicketActionsView(ticket_channel.id)
+            await ticket_channel.send("**Ticket Actions:**", view=view)
+            
             # Store ticket info
             TICKET_INFO[ticket_channel.id] = {
                 'user_id': user.id,
                 'ticket_number': ticket_number,
                 'category': category,
-                'created_at': datetime.now()
+                'created_at': datetime.now(),
+                'members': []
             }
             
             # Send log message if log channel is set
@@ -680,6 +796,46 @@ class TicketCategoryView(discord.ui.View):
     def __init__(self):
         super().__init__()
         self.add_item(TicketCategorySelect())
+
+# Ticket Actions View
+class TicketActionsView(discord.ui.View):
+    def __init__(self, channel_id):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+    
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.green, emoji="✅")
+    async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.guild.get_channel(self.channel_id)
+        if not channel:
+            await interaction.response.send_message("❌ Ticket channel not found!", ephemeral=True)
+            return
+        
+        if self.channel_id in TICKET_CLAIMED_BY:
+            claimer = interaction.guild.get_member(TICKET_CLAIMED_BY[self.channel_id])
+            await interaction.response.send_message(f"❌ This ticket is already claimed by {claimer.mention}", ephemeral=True)
+            return
+        
+        TICKET_CLAIMED_BY[self.channel_id] = interaction.user.id
+        
+        embed = discord.Embed(
+            title=f"{EMOJI_USER_HISTORY} Ticket Claimed",
+            description=f"{interaction.user.mention} has claimed this ticket",
+            color=discord.Color(0x3498db)
+        )
+        embed.set_image(url=LOGO_URL)
+        await channel.send(embed=embed)
+        
+        await interaction.response.send_message(f"✅ You claimed the ticket!", ephemeral=True)
+    
+    @discord.ui.button(label="Add Member", style=discord.ButtonStyle.blurple, emoji=EMOJI_PLUS)
+    async def add_member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = AddMemberModal()
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label="Remove Member", style=discord.ButtonStyle.red, emoji=EMOJI_USER_MINUS)
+    async def remove_member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = RemoveMemberModal()
+        await interaction.response.send_modal(modal)
 
 @bot.tree.command(name="ticket-setup", description="Setup ticket category (Admin only)")
 @app_commands.checks.has_permissions(administrator=True)
@@ -1100,6 +1256,8 @@ async def close_ticket(interaction: discord.Interaction, reason: str = "No reaso
     
     # Delete ticket info
     del TICKET_INFO[channel.id]
+    if channel.id in TICKET_CLAIMED_BY:
+        del TICKET_CLAIMED_BY[channel.id]
     
     # Delete channel after 5 seconds
     await asyncio.sleep(5)
